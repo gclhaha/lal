@@ -367,7 +367,7 @@ func (group *Group) addIn() {
 
 	group.startPushIfNeeded()
 	group.startHlsIfNeeded()
-	group.startRecordFlvIfNeeded(now)
+	group.startRecordFlvIfNeeded()
 	group.startRecordMpegtsIfNeeded(now)
 }
 

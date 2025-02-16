@@ -16,13 +16,13 @@ import (
 )
 
 // startRecordFlvIfNeeded 必要时开启flv录制
-func (group *Group) startRecordFlvIfNeeded(nowUnix int64) {
+func (group *Group) startRecordFlvIfNeeded() {
 	if !group.config.RecordConfig.EnableFlv {
 		return
 	}
 
 	// 构造文件名
-	filename := fmt.Sprintf("%s-%d.flv", group.streamName, nowUnix)
+	filename := fmt.Sprintf("%s.flv", group.streamName)
 	filenameWithPath := filepath.Join(group.config.RecordConfig.FlvOutPath, filename)
 
 	// 初始化录制
