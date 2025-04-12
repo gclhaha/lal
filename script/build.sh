@@ -48,13 +48,13 @@ echo "build" ${ROOT_DIR}/app/lalserver "..."
 cd ${ROOT_DIR}/app/lalserver && go build -ldflags "$LDFlags" -o ${OUT_DIR}/lalserver
 #cd ${ROOT_DIR}/app/lalserver && go build -race -ldflags "$LDFlags" -o ${OUT_DIR}/lalserver.debug
 
-for file in `ls ${ROOT_DIR}/app/demo`
-do
-  if [ -d ${ROOT_DIR}/app/demo/${file} ]; then
-    echo "build" ${ROOT_DIR}/app/demo/${file} "..."
-    cd ${ROOT_DIR}/app/demo/${file} && go build -ldflags "$LDFlags" -o ${OUT_DIR}/${file}
-  fi
-done
+# for file in `ls ${ROOT_DIR}/app/demo`
+# do
+#   if [ -d ${ROOT_DIR}/app/demo/${file} ]; then
+#     echo "build" ${ROOT_DIR}/app/demo/${file} "..."
+#     cd ${ROOT_DIR}/app/demo/${file} && go build -ldflags "$LDFlags" -o ${OUT_DIR}/${file}
+#   fi
+# done
 
 if [ -d "./playground" ]; then
   for file in `ls ${ROOT_DIR}/playground`
