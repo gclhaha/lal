@@ -34,12 +34,12 @@
     "enable_https": true,
     "url_pattern": "/hls/",
     "out_path": "./lal_record/hls/",
-    "fragment_duration_ms": 30000,
+    "fragment_duration_ms": 300000,
     "fragment_num": 6,
     "delete_threshold": 6,
     "cleanup_mode": 1,
     "use_memory_as_disk_flag": false,
-    "sub_session_timeout_ms": 30000,
+    "sub_session_timeout_ms": 300000,
     "sub_session_hash_key": ""
   },
   "httpts": {
@@ -65,7 +65,7 @@
     "ws_rtsp_addr": ":5566"
   },
   "record": {
-    "enable_flv": true,
+    "enable_flv": false,
     "flv_out_path": "./lal_record/flv/",
     "enable_mpegts": false,
     "mpegts_out_path": "./lal_record/mpegts"
@@ -86,7 +86,7 @@
   "server_id": "1",
   "http_notify": {
     "enable": true,
-    "update_interval_sec": 60,
+    "update_interval_sec": 600,
     "on_update": "",
     "on_pub_start": "",
     "on_pub_stop": "",

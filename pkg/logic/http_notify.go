@@ -29,13 +29,14 @@ import (
 
 // CameraRecord 摄像头记录表结构
 type CameraRecord struct {
-	ID         uint `gorm:"primaryKey"`
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
-	StreamName string `gorm:"index"`
-	VideoPath  string
-	StartTime  time.Time `gorm:"index"`
-	Status     string
+	ID         int64     `json:"id" db:"id"`                             // 主键ID
+	CreatedAt  time.Time `json:"created_at,omitempty" db:"created_at"`   // 创建时间，允许为NULL
+	UpdatedAt  time.Time `json:"updated_at,omitempty" db:"updated_at"`   // 更新时间，允许为NULL
+	StreamName string    `json:"stream_name,omitempty" db:"stream_name"` // 流名称，允许为NULL
+	VideoURL   string    `json:"video_url,omitempty" db:"video_url"`     // 视频URL，允许为NULL
+	StartTime  time.Time `json:"start_time,omitempty" db:"start_time"`   // 开始时间，允许为NULL
+	Status     string    `json:"status,omitempty" db:"status"`           // 状态，允许为NULL
+	VideoPath  string    `json:"video_path,omitempty" db:"video_path"`   // 视频路径，允许为NULL
 }
 
 func (CameraRecord) TableName() string {
@@ -163,21 +164,44 @@ func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
 func (h *HttpNotify) OnPubStart(info base.PubStartInfo) {
 	// h.NotifyPubStart(info)
 
-	// 插入新的记录
-	startTime := time.Now()
-	record := CameraRecord{
-		StreamName: info.StreamName,
-		VideoPath:  filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName)),
-		StartTime:  startTime,
-		Status:     "recording",
-	}
+	// 拼接出video_url
+	// Get the current date in the format YYYY-MM-DD
+	currentDate := time.Now().Format("2006-01-02")
 
-	result := db.Create(&record)
-	if result.Error != nil {
-		log.Printf("Failed to insert record into database: %v", result.Error)
+	// Construct the object name with streamname, appname, date, and filename
+	objectName := fmt.Sprintf("%s%s/%s/%s", "https://leep-oss.oss-cn-shanghai.aliyuncs.com/", info.StreamName, currentDate, fmt.Sprintf("%s.flv", info.StreamName))
+
+	// 判断是否存在重复的记录，有则更新，没有则插入
+	var record CameraRecord
+	result := db.Where("stream_name = ? AND status = ?", info.StreamName, "recording").First(&record)
+	if result.Error == nil {
+		// 更新已有记录
+		result = db.Model(&record).Updates(CameraRecord{
+			Status:    "recording",
+		})
+		if result.Error != nil {
+			log.Printf("Failed to update record in database: %v", result.Error)
+			return
+		}
+		log.Printf("Updated existing record for stream: %s", info.StreamName)
 		return
-	}
+	} else {
+		// 插入新的记录
+		startTime := time.Now()
+		record := CameraRecord{
+			StreamName: info.StreamName,
+			VideoPath:  filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName)),
+			StartTime:  startTime,
+			Status:     "recording",
+			VideoURL:   objectName,
+		}
 
+		result := db.Create(&record)
+		if result.Error != nil {
+			log.Printf("Failed to insert record into database: %v", result.Error)
+			return
+		}
+	}
 	log.Printf("Inserted new record for stream: %s", info.StreamName)
 }
 
@@ -226,10 +250,11 @@ func (h *HttpNotify) OnHlsMakeTs(info base.HlsMakeTsInfo) {
 	flvFilePath := filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName))
 
 	// Upload the FLV file to OSS
-	err := uploadFileToOSS(flvFilePath, info.StreamName)
+	objectName, err := uploadFileToOSS(flvFilePath, info.StreamName)
 	if err != nil {
 		log.Printf("Failed to upload FLV file to OSS: %v", err)
 	}
+	log.Printf("Updated record for stream %s with OSS path: %s", info.StreamName, objectName)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -265,7 +290,7 @@ func (h *HttpNotify) post(url string, info interface{}) {
 }
 
 // uploadFileToOSS 上传文件到OSS
-func uploadFileToOSS(filePath, streamName string) error {
+func uploadFileToOSS(filePath, streamName string) (string, error) {
 	// 创建OSS客户端
 	cfg := oss.LoadDefaultConfig().
 		WithCredentialsProvider(credentials.NewEnvironmentVariableCredentialsProvider()).
@@ -280,7 +305,7 @@ func uploadFileToOSS(filePath, streamName string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("Error opening file: %v", err)
-		return err
+		return "", err
 	}
 	defer file.Close()
 
@@ -298,8 +323,8 @@ func uploadFileToOSS(filePath, streamName string) error {
 
 	if err != nil {
 		log.Printf("Error uploading file to OSS: %v", err)
-		return err
+		return "", err
 	}
 	log.Printf("Successfully uploaded file to OSS: %s to object %s", file.Name(), objectName)
-	return nil
+	return objectName, nil
 }
