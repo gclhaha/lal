@@ -39,3 +39,5 @@ delay.txt
 *.flv
 *.log
 *.laldump
+
+.DS_Store

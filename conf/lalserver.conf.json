@@ -65,7 +65,7 @@
     "ws_rtsp_addr": ":5566"
   },
   "record": {
-    "enable_flv": false,
+    "enable_flv": true,
     "flv_out_path": "./lal_record/flv/",
     "enable_mpegts": false,
     "mpegts_out_path": "./lal_record/mpegts"
