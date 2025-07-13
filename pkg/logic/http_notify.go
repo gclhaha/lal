@@ -75,18 +75,20 @@ type HttpNotify struct {
 	cfg HttpNotifyConfig
 
 	serverId string
+	sm       *ServerManager
 
 	taskQueue chan PostTask
 	client    *http.Client
 }
 
-func NewHttpNotify(cfg HttpNotifyConfig, serverId string) *HttpNotify {
+func NewHttpNotify(cfg HttpNotifyConfig, serverId string, sm *ServerManager) *HttpNotify {
 	// 初始化数据库连接
 	initDB()
 
 	httpNotify := &HttpNotify{
 		cfg:       cfg,
 		serverId:  serverId,
+		sm:        sm,
 		taskQueue: make(chan PostTask, maxTaskLen),
 		client: &http.Client{
 			Timeout: time.Duration(notifyTimeoutSec) * time.Second,
@@ -158,66 +160,156 @@ func (h *HttpNotify) OnServerStart(info base.LalInfo) {
 }
 
 func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
-	h.NotifyUpdate(info)
+	// h.NotifyUpdate(info)
+
+	// 将此回调作为每日文件切割的定时检查器
+	now := time.Now()
+	for _, group := range info.Groups {
+		// 只关心正在推的流
+		if group.StatPub.SessionId == "" {
+			continue
+		}
+
+		// 从数据库查找对应的"recording"记录
+		var record CameraRecord
+		result := db.Where("stream_name = ? AND status = ?", group.StreamName, "recording").First(&record)
+		if result.Error != nil {
+			// 找不到记录，可能是在OnPubStart之前触发了，忽略
+			continue
+		}
+
+		// 1. 检查是否跨天，如果跨天则执行轮转，并跳过本次周期性上传
+		if now.Year() > record.StartTime.Year() || now.YearDay() > record.StartTime.YearDay() {
+			log.Printf("Daily rotation triggered for stream %s. Kicking session to rotate file.", group.StreamName)
+
+			// 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
+			kickPayload := base.ApiCtrlKickSessionReq{
+				StreamName: group.StreamName,
+				SessionId:  group.StatPub.SessionId,
+			}
+			h.sm.CtrlKickSession(kickPayload)
+			// 踢出后，由OnPubStop处理，此处跳过
+			continue
+		}
+
+		// 2. 如果未跨天，执行周期性上传（异步）
+		originalPath := record.VideoPath
+		if _, err := os.Stat(originalPath); os.IsNotExist(err) {
+			log.Printf("Recording file %s does not exist yet for periodic upload.", originalPath)
+			continue
+		}
+
+		log.Printf("Periodic upload triggered for stream %s.", group.StreamName)
+		go func(path, stream string) {
+			objectName, err := uploadFileToOSS(path, stream)
+			if err != nil {
+				log.Printf("Failed to perform periodic upload for stream %s: %v", stream, err)
+			} else {
+				log.Printf("Periodic upload successful for stream %s to object %s", stream, objectName)
+			}
+		}(originalPath, group.StreamName)
+	}
 }
 
 func (h *HttpNotify) OnPubStart(info base.PubStartInfo) {
 	// h.NotifyPubStart(info)
 
-	// 拼接出video_url
-	// Get the current date in the format YYYY-MM-DD
-	currentDate := time.Now().Format("2006-01-02")
-
-	// Construct the object name with streamname, appname, date, and filename
-	objectName := fmt.Sprintf("%s%s/%s/%s", "https://leep-oss.oss-cn-shanghai.aliyuncs.com/", info.StreamName, currentDate, fmt.Sprintf("%s.flv", info.StreamName))
-
-	// 判断是否存在重复的记录，有则更新，没有则插入
+	// 推流开始时，只记录一个初始状态
+	// 检查是否已有未完成的记录，避免重复插入
 	var record CameraRecord
 	result := db.Where("stream_name = ? AND status = ?", info.StreamName, "recording").First(&record)
 	if result.Error == nil {
-		// 更新已有记录
-		result = db.Model(&record).Updates(CameraRecord{
-			Status:    "recording",
-		})
-		if result.Error != nil {
-			log.Printf("Failed to update record in database: %v", result.Error)
-			return
-		}
-		log.Printf("Updated existing record for stream: %s", info.StreamName)
+		log.Printf("Stream %s is already marked as recording. Skipping new record creation.", info.StreamName)
 		return
-	} else {
-		// 插入新的记录
-		startTime := time.Now()
-		record := CameraRecord{
-			StreamName: info.StreamName,
-			VideoPath:  filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName)),
-			StartTime:  startTime,
-			Status:     "recording",
-			VideoURL:   objectName,
-		}
-
-		result := db.Create(&record)
-		if result.Error != nil {
-			log.Printf("Failed to insert record into database: %v", result.Error)
-			return
-		}
 	}
+
+	// 插入新的记录
+	startTime := time.Now()
+	record = CameraRecord{
+		StreamName: info.StreamName,
+		// VideoPath 存储 lalserver 默认的录制路径
+		VideoPath: filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName)),
+		StartTime: startTime,
+		Status:    "recording",
+		// VideoURL 此时为空，在推流结束后更新
+		VideoURL: "",
+	}
+
+	result = db.Create(&record)
+	if result.Error != nil {
+		log.Printf("Failed to insert record into database: %v", result.Error)
+		return
+	}
+
 	log.Printf("Inserted new record for stream: %s", info.StreamName)
+
 }
 
 func (h *HttpNotify) OnPubStop(info base.PubStopInfo) {
 	// h.NotifyPubStop(info)
 
-	// 更新对应 stream 的记录状态为 finished
-	result := db.Model(&CameraRecord{}).
-		Where("stream_name = ? AND status = ?", info.StreamName, "recording").
-		Update("status", "finished")
+	// 查找对应的 "recording" 记录
+	var record CameraRecord
+	result := db.Where("stream_name = ? AND status = ?", info.StreamName, "recording").First(&record)
+	if result.Error != nil {
+		log.Printf("Could not find recording record for stream %s to stop: %v", info.StreamName, result.Error)
+		return
+	}
+
+	// 1. 重命名文件，加入日期和时间以确保唯一性
+	originalPath := record.VideoPath
+	// 使用 "2006-01-02-15-04-05" 格式确保文件名在每天的多次推流中是唯一的
+	dailyFileName := fmt.Sprintf("%s-%s.flv", info.StreamName, record.StartTime.Format("2006-01-02-15-04-05"))
+	newPath := filepath.Join(filepath.Dir(originalPath), dailyFileName)
+
+	if _, err := os.Stat(originalPath); os.IsNotExist(err) {
+		log.Printf("Recording file %s not found, it might have been processed by a concurrent OnPubStop. Stream: %s", originalPath, info.StreamName)
+		// 文件不存在，可能已经被处理，或者lalserver没有成功创建文件。
+		// 尝试将记录标记为错误状态，以便排查。
+		db.Model(&record).Update("status", "finished_file_not_found")
+		return
+	}
+
+	if err := os.Rename(originalPath, newPath); err != nil {
+		log.Printf("Failed to rename file from %s to %s: %v", originalPath, newPath, err)
+		// 即使重命名失败，也尝试更新数据库状态
+		db.Model(&record).Update("status", "finished_rename_failed")
+		return
+	}
+	log.Printf("Renamed file to %s", newPath)
+
+	// 2. 上传重命名后的文件到 OSS
+	objectName, err := uploadFileToOSS(newPath, info.StreamName)
+	if err != nil {
+		log.Printf("Failed to upload FLV file to OSS: %v", err)
+		// 上传失败，更新状态以供后续处理
+		db.Model(&record).Update("status", "finished_upload_failed")
+		return
+	}
+
+	// 3. 更新数据库记录
+	ossURL := fmt.Sprintf("https://leep-oss.oss-cn-shanghai.aliyuncs.com/%s", objectName)
+	updates := CameraRecord{
+		Status:   "finished",
+		VideoURL: ossURL,
+		// 更新 VideoPath 为重命名后的路径
+		VideoPath: newPath,
+	}
+
+	result = db.Model(&record).Updates(updates)
 	if result.Error != nil {
 		log.Printf("Failed to update record for stream %s: %v", info.StreamName, result.Error)
 		return
 	}
 
-	log.Printf("Stream %s marked as finished", info.StreamName)
+	log.Printf("Stream %s marked as finished, file uploaded to %s", info.StreamName, ossURL)
+
+	// 4. 归档成功后，删除本地文件
+	if err := os.Remove(newPath); err != nil {
+		log.Printf("Failed to remove local file %s after archiving: %v", newPath, err)
+	} else {
+		log.Printf("Removed local file %s.", newPath)
+	}
 }
 
 func (h *HttpNotify) OnSubStart(info base.SubStartInfo) {
@@ -241,20 +333,7 @@ func (h *HttpNotify) OnRtmpConnect(info base.RtmpConnectInfo) {
 }
 
 func (h *HttpNotify) OnHlsMakeTs(info base.HlsMakeTsInfo) {
-	// h.NotifyOnHlsMakeTs(info)
-
-	// Log the event
-	log.Printf("HLS TS file created: %s", info.TsFile)
-
-	// Construct the FLV file path (assuming the FLV file is in the same directory as the TS file)
-	flvFilePath := filepath.Join("lal_record/flv/", fmt.Sprintf("%s.flv", info.StreamName))
-
-	// Upload the FLV file to OSS
-	objectName, err := uploadFileToOSS(flvFilePath, info.StreamName)
-	if err != nil {
-		log.Printf("Failed to upload FLV file to OSS: %v", err)
-	}
-	log.Printf("Updated record for stream %s with OSS path: %s", info.StreamName, objectName)
+	h.NotifyOnHlsMakeTs(info)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

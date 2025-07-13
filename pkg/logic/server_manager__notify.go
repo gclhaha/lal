@@ -26,7 +26,7 @@ func (sm *ServerManager) nhInitNotifyHandler() {
 
 	// 如果外部没有传入，则使用默认的http notify handler
 	if sm.option.NotifyHandler == nil {
-		sm.option.NotifyHandler = NewHttpNotify(sm.config.HttpNotifyConfig, sm.config.ServerId)
+		sm.option.NotifyHandler = NewHttpNotify(sm.config.HttpNotifyConfig, sm.config.ServerId, sm)
 	}
 
 	sm.notifyHandlerThread, _ = taskpool.NewPool(func(option *taskpool.Option) {

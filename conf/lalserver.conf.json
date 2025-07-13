@@ -30,7 +30,7 @@
     "single_gop_max_frame_num": 0
   },
   "hls": {
-    "enable": true,
+    "enable": false,
     "enable_https": true,
     "url_pattern": "/hls/",
     "out_path": "./lal_record/hls/",
@@ -86,10 +86,10 @@
   "server_id": "1",
   "http_notify": {
     "enable": true,
-    "update_interval_sec": 600,
-    "on_update": "",
-    "on_pub_start": "",
-    "on_pub_stop": "",
+    "update_interval_sec": 60,
+    "on_update": "http://127.0.0.1:10101/on_update",
+    "on_pub_start": "http://127.0.0.1:10101/on_server_start",
+    "on_pub_stop": "http://127.0.0.1:10101/on_pub_stop",
     "on_sub_start": "",
     "on_sub_stop": "",
     "on_relay_pull_start": "",
