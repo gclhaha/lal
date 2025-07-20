@@ -162,7 +162,9 @@ func (h *HttpNotify) OnServerStart(info base.LalInfo) {
 func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
 	// h.NotifyUpdate(info)
 
-	// 将此回调作为每日文件切割的定时检查器
+	// 每次更新时检查所有正在推流的流，处理以下场景:
+	// 1. 检查是否录制时长已超过6小时，如果超过则进行视频轮转
+	// 2. 检查是否跨天，如果跨天则执行轮转
 	now := time.Now()
 	for _, group := range info.Groups {
 		// 只关心正在推的流
@@ -178,9 +180,29 @@ func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
 			continue
 		}
 
-		// 1. 检查是否跨天，如果跨天则执行轮转，并跳过本次周期性上传
+		// 计算当前录制时长
+		recordDuration := now.Sub(record.StartTime)
+		sixHours := 6 * time.Hour
+
+		// 1. 检查是否超过6小时，如果超过则执行轮转
+		if recordDuration >= sixHours {
+			log.Printf("流 %s 的录制已超过6小时 (%s)。正在轮转视频文件。",
+				group.StreamName, recordDuration.String())
+
+			// 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
+			kickPayload := base.ApiCtrlKickSessionReq{
+				StreamName: group.StreamName,
+				SessionId:  group.StatPub.SessionId,
+			}
+			h.sm.CtrlKickSession(kickPayload)
+			// 踢出后，由OnPubStop处理，此处跳过继续检查其他流
+			continue
+		}
+
+		// 2. 检查是否跨天，如果跨天则执行轮转
 		if now.Year() > record.StartTime.Year() || now.YearDay() > record.StartTime.YearDay() {
-			log.Printf("Daily rotation triggered for stream %s. Kicking session to rotate file.", group.StreamName)
+			log.Printf("触发了流 %s 的每日轮转。踢出会话以轮转文件。",
+				group.StreamName)
 
 			// 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
 			kickPayload := base.ApiCtrlKickSessionReq{
@@ -191,23 +213,6 @@ func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
 			// 踢出后，由OnPubStop处理，此处跳过
 			continue
 		}
-
-		// 2. 如果未跨天，执行周期性上传（异步）
-		originalPath := record.VideoPath
-		if _, err := os.Stat(originalPath); os.IsNotExist(err) {
-			log.Printf("Recording file %s does not exist yet for periodic upload.", originalPath)
-			continue
-		}
-
-		log.Printf("Periodic upload triggered for stream %s.", group.StreamName)
-		go func(path, stream string) {
-			objectName, err := uploadFileToOSS(path, stream)
-			if err != nil {
-				log.Printf("Failed to perform periodic upload for stream %s: %v", stream, err)
-			} else {
-				log.Printf("Periodic upload successful for stream %s to object %s", stream, objectName)
-			}
-		}(originalPath, group.StreamName)
 	}
 }
 
@@ -252,7 +257,7 @@ func (h *HttpNotify) OnPubStop(info base.PubStopInfo) {
 	var record CameraRecord
 	result := db.Where("stream_name = ? AND status = ?", info.StreamName, "recording").First(&record)
 	if result.Error != nil {
-		log.Printf("Could not find recording record for stream %s to stop: %v", info.StreamName, result.Error)
+		log.Printf("无法找到流 %s 的录制记录以停止: %v", info.StreamName, result.Error)
 		return
 	}
 
@@ -263,7 +268,7 @@ func (h *HttpNotify) OnPubStop(info base.PubStopInfo) {
 	newPath := filepath.Join(filepath.Dir(originalPath), dailyFileName)
 
 	if _, err := os.Stat(originalPath); os.IsNotExist(err) {
-		log.Printf("Recording file %s not found, it might have been processed by a concurrent OnPubStop. Stream: %s", originalPath, info.StreamName)
+		log.Printf("未找到录制文件 %s，可能已被并发的OnPubStop处理。流名称: %s", originalPath, info.StreamName)
 		// 文件不存在，可能已经被处理，或者lalserver没有成功创建文件。
 		// 尝试将记录标记为错误状态，以便排查。
 		db.Model(&record).Update("status", "finished_file_not_found")
@@ -271,45 +276,26 @@ func (h *HttpNotify) OnPubStop(info base.PubStopInfo) {
 	}
 
 	if err := os.Rename(originalPath, newPath); err != nil {
-		log.Printf("Failed to rename file from %s to %s: %v", originalPath, newPath, err)
+		log.Printf("重命名文件失败，从 %s 到 %s: %v", originalPath, newPath, err)
 		// 即使重命名失败，也尝试更新数据库状态
 		db.Model(&record).Update("status", "finished_rename_failed")
 		return
 	}
-	log.Printf("Renamed file to %s", newPath)
+	log.Printf("文件已重命名为 %s", newPath)
 
-	// 2. 上传重命名后的文件到 OSS
-	objectName, err := uploadFileToOSS(newPath, info.StreamName)
-	if err != nil {
-		log.Printf("Failed to upload FLV file to OSS: %v", err)
-		// 上传失败，更新状态以供后续处理
-		db.Model(&record).Update("status", "finished_upload_failed")
-		return
-	}
-
-	// 3. 更新数据库记录
-	ossURL := fmt.Sprintf("https://leep-oss.oss-cn-shanghai.aliyuncs.com/%s", objectName)
+	// 2. 直接更新数据库记录，保留本地文件路径
 	updates := CameraRecord{
-		Status:   "finished",
-		VideoURL: ossURL,
-		// 更新 VideoPath 为重命名后的路径
-		VideoPath: newPath,
+		Status:    "finished",
+		VideoPath: newPath, // 更新为重命名后的本地路径
 	}
 
 	result = db.Model(&record).Updates(updates)
 	if result.Error != nil {
-		log.Printf("Failed to update record for stream %s: %v", info.StreamName, result.Error)
+		log.Printf("更新流 %s 的记录失败: %v", info.StreamName, result.Error)
 		return
 	}
 
-	log.Printf("Stream %s marked as finished, file uploaded to %s", info.StreamName, ossURL)
-
-	// 4. 归档成功后，删除本地文件
-	if err := os.Remove(newPath); err != nil {
-		log.Printf("Failed to remove local file %s after archiving: %v", newPath, err)
-	} else {
-		log.Printf("Removed local file %s.", newPath)
-	}
+	log.Printf("流 %s 已标记为完成，本地文件保存在 %s", info.StreamName, newPath)
 }
 
 func (h *HttpNotify) OnSubStart(info base.SubStartInfo) {

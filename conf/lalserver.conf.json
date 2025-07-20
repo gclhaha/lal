@@ -30,8 +30,8 @@
     "single_gop_max_frame_num": 0
   },
   "hls": {
-    "enable": false,
-    "enable_https": false,
+    "enable": true,
+    "enable_https": true,
     "url_pattern": "/hls/",
     "out_path": "./lal_record/hls/",
     "fragment_duration_ms": 300000,
@@ -114,7 +114,7 @@
     "addr": ":8084"
   },
   "log": {
-    "level": 1,
+    "level": 2,
     "filename": "./logs/lalserver.log",
     "is_to_stdout": true,
     "is_rotate_daily": true,

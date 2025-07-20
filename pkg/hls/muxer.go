@@ -168,7 +168,7 @@ func (m *Muxer) FeedMpegts(tsPackets []byte, frame *mpegts.Frame, boundary bool)
 		}
 		if !m.opened {
 			// 走到这，可能是第一个包并且boundary为false
-			Log.Warnf("[%s] FeedMpegts V not opened. boundary=%t, key=%t", m.UniqueKey, boundary, frame.Key)
+			// Log.Warnf("[%s] FeedMpegts V not opened. boundary=%t, key=%t", m.UniqueKey, boundary, frame.Key)
 			return
 		}
 		//Log.Debugf("[%s] WriteFrame V. dts=%d, len=%d", m.UniqueKey, frame.Dts, len(frame.Raw))
