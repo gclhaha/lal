@@ -160,60 +160,93 @@ func (h *HttpNotify) OnServerStart(info base.LalInfo) {
 }
 
 func (h *HttpNotify) OnUpdate(info base.UpdateInfo) {
-	// h.NotifyUpdate(info)
+    // h.NotifyUpdate(info)
 
-	// 每次更新时检查所有正在推流的流，处理以下场景:
-	// 1. 检查是否录制时长已超过6小时，如果超过则进行视频轮转
-	// 2. 检查是否跨天，如果跨天则执行轮转
-	now := time.Now()
-	for _, group := range info.Groups {
-		// 只关心正在推的流
-		if group.StatPub.SessionId == "" {
-			continue
-		}
+    // 每次更新时检查所有正在推流的流，处理以下场景:
+    // 1. 检查是否录制时长已超过6小时，如果超过则进行视频轮转
+    // 2. 检查是否跨天，如果跨天则执行轮转
+    // 3. 检查是否跨越10分钟间隔，如果是则执行轮转，避免文件过大
+    now := time.Now()
+    for _, group := range info.Groups {
+        // 只关心正在推的流
+        if group.StatPub.SessionId == "" {
+            continue
+        }
 
-		// 从数据库查找对应的"recording"记录
-		var record CameraRecord
-		result := db.Where("stream_name = ? AND status = ?", group.StreamName, "recording").First(&record)
-		if result.Error != nil {
-			// 找不到记录，可能是在OnPubStart之前触发了，忽略
-			continue
-		}
+        // 从数据库查找对应的"recording"记录
+        var record CameraRecord
+        result := db.Where("stream_name = ? AND status = ?", group.StreamName, "recording").First(&record)
+        if result.Error != nil {
+            // 找不到记录，可能是在OnPubStart之前触发了，忽略
+            continue
+        }
 
-		// 计算当前录制时长
-		recordDuration := now.Sub(record.StartTime)
-		sixHours := 6 * time.Hour
+        // 计算当前录制时长
+        recordDuration := now.Sub(record.StartTime)
+        sixHours := 6 * time.Hour
 
-		// 1. 检查是否超过6小时，如果超过则执行轮转
-		if recordDuration >= sixHours {
-			log.Printf("流 %s 的录制已超过6小时 (%s)。正在轮转视频文件。",
-				group.StreamName, recordDuration.String())
+        // 1. 检查是否超过6小时，如果超过则执行轮转
+        if recordDuration >= sixHours {
+            log.Printf("流 %s 的录制已超过6小时 (%s)。正在轮转视频文件。",
+                group.StreamName, recordDuration.String())
 
-			// 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
-			kickPayload := base.ApiCtrlKickSessionReq{
-				StreamName: group.StreamName,
-				SessionId:  group.StatPub.SessionId,
-			}
-			h.sm.CtrlKickSession(kickPayload)
-			// 踢出后，由OnPubStop处理，此处跳过继续检查其他流
-			continue
-		}
+            // 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
+            kickPayload := base.ApiCtrlKickSessionReq{
+                StreamName: group.StreamName,
+                SessionId:  group.StatPub.SessionId,
+            }
+            h.sm.CtrlKickSession(kickPayload)
+            // 踢出后，由OnPubStop处理，此处跳过继续检查其他流
+            continue
+        }
 
-		// 2. 检查是否跨天，如果跨天则执行轮转
-		if now.Year() > record.StartTime.Year() || now.YearDay() > record.StartTime.YearDay() {
-			log.Printf("触发了流 %s 的每日轮转。踢出会话以轮转文件。",
-				group.StreamName)
+        // 2. 检查是否跨天，如果跨天则执行轮转
+        if now.Year() > record.StartTime.Year() || now.YearDay() > record.StartTime.YearDay() {
+            log.Printf("触发了流 %s 的每日轮转。踢出会话以轮转文件。",
+                group.StreamName)
 
-			// 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
-			kickPayload := base.ApiCtrlKickSessionReq{
-				StreamName: group.StreamName,
-				SessionId:  group.StatPub.SessionId,
-			}
-			h.sm.CtrlKickSession(kickPayload)
-			// 踢出后，由OnPubStop处理，此处跳过
-			continue
-		}
-	}
+            // 调用lalserver的HTTP API来踢掉会话，这将触发OnPubStop
+            kickPayload := base.ApiCtrlKickSessionReq{
+                StreamName: group.StreamName,
+                SessionId:  group.StatPub.SessionId,
+            }
+            h.sm.CtrlKickSession(kickPayload)
+            // 踢出后，由OnPubStop处理，此处跳过
+            continue
+        }
+
+        // 3. 检查是否跨越10分钟间隔，如果是则执行轮转
+        // 原来的1小时轮转逻辑（注释保留）：
+        // if recordDuration.Minutes() > 1 && record.StartTime.Hour() != now.Hour() {
+        //     log.Printf("流 %s 录制已经跨越整点小时 (当前: %d时，开始: %d时)。执行每小时文件轮转。",
+        //         group.StreamName, now.Hour(), record.StartTime.Hour())
+        //
+        //     kickPayload := base.ApiCtrlKickSessionReq{
+        //         StreamName: group.StreamName,
+        //         SessionId:  group.StatPub.SessionId,
+        //     }
+        //     h.sm.CtrlKickSession(kickPayload)
+        //     continue
+        // }
+
+        // 新的10分钟轮转逻辑:
+        // 计算开始时间的10分钟区间和当前时间的10分钟区间
+        startInterval := record.StartTime.Minute() / 10
+        currentInterval := now.Minute() / 10
+        
+        // 如果跨越了小时或10分钟间隔，并且录制时长至少超过1分钟（避免频繁轮转）
+        if recordDuration.Minutes() > 1 && (record.StartTime.Hour() != now.Hour() || startInterval != currentInterval) {
+            log.Printf("流 %s 录制已经跨越10分钟间隔 (当前: %d时%d分，开始: %d时%d分)。执行10分钟文件轮转。",
+                group.StreamName, now.Hour(), now.Minute(), record.StartTime.Hour(), record.StartTime.Minute())
+
+            kickPayload := base.ApiCtrlKickSessionReq{
+                StreamName: group.StreamName,
+                SessionId:  group.StatPub.SessionId,
+            }
+            h.sm.CtrlKickSession(kickPayload)
+            continue
+        }
+    }
 }
 
 func (h *HttpNotify) OnPubStart(info base.PubStartInfo) {
